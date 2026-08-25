@@ -2,84 +2,71 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
+
 /*
 ===========================================================
-        ESP32 主从机械臂控制系统
-===========================================================
+ ESP32 主从机械臂控制系统 FINAL
 
-功能：
+ 功能：
 
-1. 4自由度主从机械臂
-2. 电位器控制：
-   Base      → GPIO32
-   Arm       → GPIO33
-   Forearm   → GPIO34
-   Gripper   → GPIO35
-
-3. 舵机：
-   Base      → GPIO18
-   Arm       → GPIO19
-   Forearm   → GPIO21
-   Gripper   → GPIO22
-
-4. 启动按钮：
-   GPIO23
-
-5. ESP32板载蓝色LED：
-   GPIO2
-
-6. 通电后需要按按钮启动
-7. 启动时蓝灯快速闪烁3秒
-8. 3秒后蓝灯常亮，进入工作状态
-9. 工作状态再次按按钮：
-   机械臂回到指定位置
-   Base    = 144°
-   Arm     = 83°
-   Forearm = 58°
-   Gripper = 22°
-
-10. 复位过程中蓝灯快速闪烁3秒
-11. 复位完成后蓝灯熄灭，进入待机
-
-12. 电位器滤波
-13. 舵机平滑运动
-14. 每个关节独立最大速度
-15. 电位器异常/断线时保持当前舵机位置
-16. 保存最后目标位置到ESP32 Flash
+ 1. 四自由度主从机械臂
+ 2. 270°电位器匹配180°MG90S
+ 3. ADC滤波
+ 4. ADC死区
+ 5. 杜邦线掉线保持当前位置
+ 6. 舵机速度限制
+ 7. 平滑运动
+ 8. 按钮启动
+ 9. 蓝灯状态提示
+10. 复位
+11. Flash保存实际位置
 
 ===========================================================
 */
 
 
-// ========================================================
-// ① GPIO定义
-// ========================================================
-
-// ---------- 电位器 ----------
-const int POT_BASE    = 32;
-const int POT_ARM     = 33;
-const int POT_FOREARM = 34;
-const int POT_GRIPPER = 35;
-
-
-// ---------- 舵机 ----------
-const int SERVO_BASE    = 18;
-const int SERVO_ARM     = 19;
-const int SERVO_FOREARM = 21;
-const int SERVO_GRIPPER = 22;
-
-
-// ---------- 按钮 ----------
-const int BUTTON_PIN = 23;
-
-
-// ---------- 板载蓝色LED ----------
-const int LED_PIN = 2;
-
 
 // ========================================================
-// ② 创建舵机对象
+// GPIO
 // ========================================================
+
+
+// 电位器
+
+#define POT_BASE       32
+#define POT_ARM        33
+#define POT_FOREARM    34
+#define POT_GRIPPER    35
+
+
+
+// 舵机
+
+#define SERVO_BASE     18
+#define SERVO_ARM      19
+#define SERVO_FOREARM  21
+#define SERVO_GRIPPER  22
+
+
+
+// 按钮
+
+#define BUTTON_PIN     23
+
+
+
+// LED
+
+#define LED_PIN        2
+
+
+
+
+
+// ========================================================
+// 舵机对象
+// ========================================================
+
 
 Servo servoBase;
 Servo servoArm;
@@ -87,190 +74,453 @@ Servo servoForearm;
 Servo servoGripper;
 
 
+
+
+
 // ========================================================
-// ③ Flash存储
+// Flash
 // ========================================================
+
 
 Preferences preferences;
 
 
+
+
+
 // ========================================================
-// ④ 系统状态
+// 状态机
 // ========================================================
+
 
 enum SystemState
 {
-    IDLE,       // 待机
-    STARTING,   // 启动自检
-    RUNNING,    // 正常运行
-    RESETTING   // 机械臂复位
+
+    IDLE,
+
+    STARTING,
+
+    RUNNING,
+
+    RESETTING
+
 };
 
-SystemState systemState = IDLE;
+
+SystemState systemState =
+IDLE;
 
 
-// ========================================================
-// ⑤ 复位位置
-// ========================================================
 
-const float RESET_BASE    = 144.0;
-const float RESET_ARM     = 83.0;
-const float RESET_FOREARM = 58.0;
-const float RESET_GRIPPER = 22.0;
 
 
 // ========================================================
-// ⑥ 舵机最大速度
+// 复位角度
+// ========================================================
+
+
+const float RESET_BASE =
+144;
+
+
+const float RESET_ARM =
+83;
+
+
+const float RESET_FOREARM =
+58;
+
+
+const float RESET_GRIPPER =
+22;
+
+
+
+
+
+// ========================================================
+// 舵机最大速度
+// 度/秒
+// ========================================================
+
+
+const float BASE_MAX_SPEED =
+50;
+
+
+const float ARM_MAX_SPEED =
+35;
+
+
+const float FOREARM_MAX_SPEED =
+40;
+
+
+const float GRIPPER_MAX_SPEED =
+80;
+
+
+
+
+
+// ========================================================
+// 电位器校准
 //
-// 单位：度/秒
-// ========================================================
-
-const float BASE_MAX_SPEED    = 50.0;
-const float ARM_MAX_SPEED     = 35.0;
-const float FOREARM_MAX_SPEED = 40.0;
-const float GRIPPER_MAX_SPEED = 80.0;
-
-
-// ========================================================
-// ⑦ 电位器校准参数
+// 270°电位器
+// 使用中间180°
 //
-// !!! 这里以后需要根据你的实际机械结构调整 !!!
-//
-// potMin / potMax:
-// 电位器实际ADC范围
-//
-// servoMin / servoMax:
-// 对应舵机实际安全范围
-//
-// reversed:
-// 是否反向
+// 后期根据实际机械调节
 // ========================================================
 
-// Base
-int BASE_POT_MIN = 0;
-int BASE_POT_MAX = 4095;
-
-int BASE_SERVO_MIN = 10;
-int BASE_SERVO_MAX = 170;
-
-bool BASE_REVERSED = false;
 
 
-// Arm
-int ARM_POT_MIN = 0;
-int ARM_POT_MAX = 4095;
-
-int ARM_SERVO_MIN = 20;
-int ARM_SERVO_MAX = 160;
-
-bool ARM_REVERSED = false;
+// -------- Base --------
 
 
-// Forearm
-int FOREARM_POT_MIN = 0;
-int FOREARM_POT_MAX = 4095;
-
-int FOREARM_SERVO_MIN = 20;
-int FOREARM_SERVO_MAX = 160;
-
-bool FOREARM_REVERSED = false;
+int BASE_POT_MIN =
+680;
 
 
-// Gripper
-int GRIPPER_POT_MIN = 0;
-int GRIPPER_POT_MAX = 4095;
-
-int GRIPPER_SERVO_MIN = 22;
-int GRIPPER_SERVO_MAX = 120;
-
-bool GRIPPER_REVERSED = false;
+int BASE_POT_MAX =
+3415;
 
 
-// ========================================================
-// ⑧ 当前角度
-// ========================================================
-
-float currentBase = RESET_BASE;
-float currentArm = RESET_ARM;
-float currentForearm = RESET_FOREARM;
-float currentGripper = RESET_GRIPPER;
+int BASE_SERVO_MIN =
+0;
 
 
-// ========================================================
-// ⑨ 目标角度
-// ========================================================
-
-float targetBase = RESET_BASE;
-float targetArm = RESET_ARM;
-float targetForearm = RESET_FOREARM;
-float targetGripper = RESET_GRIPPER;
+int BASE_SERVO_MAX =
+180;
 
 
-// ========================================================
-// ⑩ 电位器滤波
-// ========================================================
-
-// EMA滤波系数
-// 越小越稳定，但反应越慢
-// 越大越灵敏，但容易抖动
-
-const float FILTER_ALPHA = 0.15;
-
-float filteredBase = 0;
-float filteredArm = 0;
-float filteredForearm = 0;
-float filteredGripper = 0;
+bool BASE_REVERSED =
+false;
 
 
-// ========================================================
-// ⑪ 按钮状态
-// ========================================================
-
-bool lastButtonState = HIGH;
-
-unsigned long lastButtonTime = 0;
-
-const unsigned long BUTTON_DEBOUNCE = 50;
+int BASE_OFFSET =
+0;
 
 
-// ========================================================
-// ⑫ LED闪烁控制
-// ========================================================
-
-unsigned long ledTimer = 0;
-
-bool ledState = false;
-
-const unsigned long LED_BLINK_INTERVAL = 100;
 
 
-// ========================================================
-// ⑬ 系统启动/复位计时
-// ========================================================
 
-unsigned long stateStartTime = 0;
-
-const unsigned long SYSTEM_SEQUENCE_TIME = 3000;
+// -------- Arm --------
 
 
-// ========================================================
-// ⑭ Flash保存
-// ========================================================
+int ARM_POT_MIN =
+680;
 
-unsigned long lastTargetChangeTime = 0;
 
-float lastSavedBase = 0;
-float lastSavedArm = 0;
-float lastSavedForearm = 0;
-float lastSavedGripper = 0;
+int ARM_POT_MAX =
+3415;
 
-const float SAVE_THRESHOLD = 2.0;
 
-const unsigned long SAVE_DELAY = 1000;
+int ARM_SERVO_MIN =
+0;
+
+
+int ARM_SERVO_MAX =
+180;
+
+
+bool ARM_REVERSED =
+false;
+
+
+int ARM_OFFSET =
+0;
+
+
+
+
+
+// -------- Forearm --------
+
+
+int FOREARM_POT_MIN =
+680;
+
+
+int FOREARM_POT_MAX =
+3415;
+
+
+int FOREARM_SERVO_MIN =
+0;
+
+
+int FOREARM_SERVO_MAX =
+180;
+
+
+bool FOREARM_REVERSED =
+false;
+
+
+int FOREARM_OFFSET =
+0;
+
+
+
+
+
+// -------- Gripper --------
+
+
+int GRIPPER_POT_MIN =
+900;
+
+
+int GRIPPER_POT_MAX =
+3200;
+
+
+int GRIPPER_SERVO_MIN =
+20;
+
+
+int GRIPPER_SERVO_MAX =
+120;
+
+
+bool GRIPPER_REVERSED =
+false;
+
+
+int GRIPPER_OFFSET =
+0;
+
+
+
 
 
 // ========================================================
-// ⑮ 读取电位器
+// 当前实际角度
+// ========================================================
+
+
+float currentBase =
+RESET_BASE;
+
+
+float currentArm =
+RESET_ARM;
+
+
+float currentForearm =
+RESET_FOREARM;
+
+
+float currentGripper =
+RESET_GRIPPER;
+
+
+
+
+
+// ========================================================
+// 目标角度
+// ========================================================
+
+
+float targetBase =
+RESET_BASE;
+
+
+float targetArm =
+RESET_ARM;
+
+
+float targetForearm =
+RESET_FOREARM;
+
+
+float targetGripper =
+RESET_GRIPPER;
+
+
+
+
+
+// ========================================================
+// ADC滤波
+// ========================================================
+
+
+const float FILTER_ALPHA =
+0.15;
+
+
+
+float filteredBase =
+0;
+
+
+float filteredArm =
+0;
+
+
+float filteredForearm =
+0;
+
+
+float filteredGripper =
+0;
+
+
+
+
+
+// ========================================================
+// ADC死区
+// ========================================================
+
+
+const float ADC_DEAD_ZONE =
+12;
+
+
+
+float lastBaseADC =
+0;
+
+
+float lastArmADC =
+0;
+
+
+float lastForearmADC =
+0;
+
+
+float lastGripperADC =
+0;
+
+
+
+
+
+// ========================================================
+// 掉线保护
+// ========================================================
+
+
+int baseErrorCount =
+0;
+
+
+int armErrorCount =
+0;
+
+
+int forearmErrorCount =
+0;
+
+
+int gripperErrorCount =
+0;
+
+
+
+const int MAX_ERROR_COUNT =
+20;
+
+
+
+
+
+// ========================================================
+// 按钮
+// ========================================================
+
+
+bool lastButtonState =
+HIGH;
+
+
+unsigned long lastButtonTime =
+0;
+
+
+const unsigned long BUTTON_DEBOUNCE =
+50;
+
+
+
+
+
+// ========================================================
+// LED
+// ========================================================
+
+
+unsigned long ledTimer =
+0;
+
+
+bool ledState =
+false;
+
+
+const unsigned long LED_BLINK_INTERVAL =
+100;
+
+
+
+
+
+// ========================================================
+// 状态计时
+// ========================================================
+
+
+unsigned long stateStartTime =
+0;
+
+
+const unsigned long SYSTEM_SEQUENCE_TIME =
+3000;
+
+
+
+
+
+// ========================================================
+// Flash保存
+// ========================================================
+
+
+unsigned long lastTargetChangeTime =
+0;
+
+
+float lastSavedBase =
+0;
+
+
+float lastSavedArm =
+0;
+
+
+float lastSavedForearm =
+0;
+
+
+float lastSavedGripper =
+0;
+
+
+
+const float SAVE_THRESHOLD =
+2;
+
+
+
+const unsigned long SAVE_DELAY =
+1000;
+
+// ========================================================
+// ADC滤波读取
 // ========================================================
 
 float readFilteredADC(
@@ -278,47 +528,55 @@ float readFilteredADC(
     float &filteredValue
 )
 {
-    int raw = analogRead(pin);
 
-    // 第一次直接初始化
-    if (filteredValue == 0)
+    int raw =
+    analogRead(pin);
+
+
+    if(filteredValue==0)
     {
-        filteredValue = raw;
+        filteredValue=raw;
     }
 
-    // EMA滤波
+
     filteredValue =
-        FILTER_ALPHA * raw +
-        (1.0 - FILTER_ALPHA) * filteredValue;
+    FILTER_ALPHA * raw +
+    (1.0-FILTER_ALPHA)*filteredValue;
+
 
     return filteredValue;
+
 }
 
 
+
+
+
 // ========================================================
-// ⑯ 电位器是否有效
-//
-// 有效范围：
-// ADC不能太接近0，也不能超过4095
-//
-// 如果你安装了10K下拉电阻，
-// 断线时一般会接近0。
+// ADC有效判断
 // ========================================================
 
 bool isADCValid(float value)
 {
-    if (value < 50)
+
+    if(value < 80)
         return false;
 
-    if (value > 4045)
+
+    if(value > 4015)
         return false;
+
 
     return true;
+
 }
 
 
+
+
+
 // ========================================================
-// ⑰ ADC → 舵机角度
+// ADC转角度
 // ========================================================
 
 float convertToAngle(
@@ -327,436 +585,771 @@ float convertToAngle(
     int potMax,
     int servoMin,
     int servoMax,
-    bool reversed
+    bool reversed,
+    int offset
 )
 {
-    adc = constrain(
+
+    adc =
+    constrain(
         adc,
         potMin,
         potMax
     );
 
+
     float angle;
 
-    if (!reversed)
+
+
+    if(!reversed)
     {
-        angle = map(
+
+        angle =
+        map(
             (long)adc,
             potMin,
             potMax,
             servoMin,
             servoMax
         );
+
     }
+
     else
     {
-        angle = map(
+
+        angle =
+        map(
             (long)adc,
             potMin,
             potMax,
             servoMax,
             servoMin
         );
+
     }
+
+
+    angle += offset;
+
 
     return constrain(
         angle,
-        servoMin,
-        servoMax
+        0,
+        180
     );
+
 }
 
 
+
+
+
 // ========================================================
-// ⑱ 平滑移动
-//
-// 根据最大速度限制当前角度变化
+// 平滑运动
 // ========================================================
 
 float moveSmooth(
     float current,
     float target,
-    float maxSpeed,
-    float deltaTime
+    float speed,
+    float dt
 )
 {
-    float difference = target - current;
 
-    // 小于0.5°直接认为到达
-    if (abs(difference) < 0.5)
+    float diff =
+    target-current;
+
+
+
+    if(abs(diff)<0.5)
     {
         return target;
     }
 
-    float maxStep =
-        maxSpeed * deltaTime;
 
-    if (difference > maxStep)
+
+    float step =
+    speed*dt;
+
+
+
+    if(diff>step)
     {
-        current += maxStep;
+        current+=step;
     }
-    else if (difference < -maxStep)
+
+    else if(diff<-step)
     {
-        current -= maxStep;
+        current-=step;
     }
+
     else
     {
-        current = target;
+        current=target;
     }
 
+
     return current;
+
 }
 
 
+
+
+
 // ========================================================
-// ⑲ 更新舵机
+// 更新舵机
 // ========================================================
 
-void updateServos(float deltaTime)
+void updateServos(
+    float dt
+)
 {
+
     currentBase =
-        moveSmooth(
-            currentBase,
-            targetBase,
-            BASE_MAX_SPEED,
-            deltaTime
-        );
+    moveSmooth(
+        currentBase,
+        targetBase,
+        BASE_MAX_SPEED,
+        dt
+    );
+
+
 
     currentArm =
-        moveSmooth(
-            currentArm,
-            targetArm,
-            ARM_MAX_SPEED,
-            deltaTime
-        );
+    moveSmooth(
+        currentArm,
+        targetArm,
+        ARM_MAX_SPEED,
+        dt
+    );
+
+
 
     currentForearm =
-        moveSmooth(
-            currentForearm,
-            targetForearm,
-            FOREARM_MAX_SPEED,
-            deltaTime
-        );
+    moveSmooth(
+        currentForearm,
+        targetForearm,
+        FOREARM_MAX_SPEED,
+        dt
+    );
+
+
 
     currentGripper =
-        moveSmooth(
-            currentGripper,
-            targetGripper,
-            GRIPPER_MAX_SPEED,
-            deltaTime
-        );
+    moveSmooth(
+        currentGripper,
+        targetGripper,
+        GRIPPER_MAX_SPEED,
+        dt
+    );
+
+
+
 
 
     servoBase.write(
         round(currentBase)
     );
 
+
     servoArm.write(
         round(currentArm)
     );
+
 
     servoForearm.write(
         round(currentForearm)
     );
 
+
     servoGripper.write(
         round(currentGripper)
     );
+
 }
 
 
+
+
+
 // ========================================================
-// ⑳ 读取主机械臂
+// 读取主机械臂
 // ========================================================
 
 void readMasterArm()
 {
-    // ---------- Base ----------
-    float baseADC =
-        readFilteredADC(
-            POT_BASE,
-            filteredBase
-        );
 
-    if (isADCValid(baseADC))
+
+// =====================================================
+// Base
+// =====================================================
+
+
+float baseADC =
+readFilteredADC(
+POT_BASE,
+filteredBase
+);
+
+
+
+if(isADCValid(baseADC))
+{
+
+    baseErrorCount=0;
+
+
+
+    if(abs(baseADC-lastBaseADC)>ADC_DEAD_ZONE)
     {
+
+        lastBaseADC=baseADC;
+
+
+
         targetBase =
-            convertToAngle(
-                baseADC,
-                BASE_POT_MIN,
-                BASE_POT_MAX,
-                BASE_SERVO_MIN,
-                BASE_SERVO_MAX,
-                BASE_REVERSED
-            );
-    }
-
-
-    // ---------- Arm ----------
-    float armADC =
-        readFilteredADC(
-            POT_ARM,
-            filteredArm
+        convertToAngle(
+            baseADC,
+            BASE_POT_MIN,
+            BASE_POT_MAX,
+            BASE_SERVO_MIN,
+            BASE_SERVO_MAX,
+            BASE_REVERSED,
+            BASE_OFFSET
         );
 
-    if (isADCValid(armADC))
-    {
-        targetArm =
-            convertToAngle(
-                armADC,
-                ARM_POT_MIN,
-                ARM_POT_MAX,
-                ARM_SERVO_MIN,
-                ARM_SERVO_MAX,
-                ARM_REVERSED
-            );
     }
 
+}
 
-    // ---------- Forearm ----------
-    float forearmADC =
-        readFilteredADC(
-            POT_FOREARM,
-            filteredForearm
-        );
+else
+{
 
-    if (isADCValid(forearmADC))
+    baseErrorCount++;
+
+
+    //掉线保持原目标
+
+    if(baseErrorCount>=MAX_ERROR_COUNT)
     {
-        targetForearm =
-            convertToAngle(
-                forearmADC,
-                FOREARM_POT_MIN,
-                FOREARM_POT_MAX,
-                FOREARM_SERVO_MIN,
-                FOREARM_SERVO_MAX,
-                FOREARM_REVERSED
-            );
+
+        targetBase =
+        currentBase;
+
     }
 
-
-    // ---------- Gripper ----------
-    float gripperADC =
-        readFilteredADC(
-            POT_GRIPPER,
-            filteredGripper
-        );
-
-    if (isADCValid(gripperADC))
-    {
-        targetGripper =
-            convertToAngle(
-                gripperADC,
-                GRIPPER_POT_MIN,
-                GRIPPER_POT_MAX,
-                GRIPPER_SERVO_MIN,
-                GRIPPER_SERVO_MAX,
-                GRIPPER_REVERSED
-            );
-    }
 }
 
 
+
+
+
+
+
+// =====================================================
+// Arm
+// =====================================================
+
+
+float armADC =
+readFilteredADC(
+POT_ARM,
+filteredArm
+);
+
+
+
+if(isADCValid(armADC))
+{
+
+    armErrorCount=0;
+
+
+    if(abs(armADC-lastArmADC)>ADC_DEAD_ZONE)
+    {
+
+        lastArmADC=armADC;
+
+
+
+        targetArm =
+        convertToAngle(
+            armADC,
+            ARM_POT_MIN,
+            ARM_POT_MAX,
+            ARM_SERVO_MIN,
+            ARM_SERVO_MAX,
+            ARM_REVERSED,
+            ARM_OFFSET
+        );
+
+    }
+
+}
+
+else
+{
+
+    armErrorCount++;
+
+
+    if(armErrorCount>=MAX_ERROR_COUNT)
+    {
+
+        targetArm =
+        currentArm;
+
+    }
+
+}
+
+
+
+
+
+
+
+// =====================================================
+// Forearm
+// =====================================================
+
+
+float forearmADC =
+readFilteredADC(
+POT_FOREARM,
+filteredForearm
+);
+
+
+
+if(isADCValid(forearmADC))
+{
+
+    forearmErrorCount=0;
+
+
+    if(abs(forearmADC-lastForearmADC)>ADC_DEAD_ZONE)
+    {
+
+        lastForearmADC=forearmADC;
+
+
+
+        targetForearm =
+        convertToAngle(
+            forearmADC,
+            FOREARM_POT_MIN,
+            FOREARM_POT_MAX,
+            FOREARM_SERVO_MIN,
+            FOREARM_SERVO_MAX,
+            FOREARM_REVERSED,
+            FOREARM_OFFSET
+        );
+
+    }
+
+}
+
+else
+{
+
+    forearmErrorCount++;
+
+
+    if(forearmErrorCount>=MAX_ERROR_COUNT)
+    {
+
+        targetForearm =
+        currentForearm;
+
+    }
+
+}
+
+
+
+
+
+
+
+// =====================================================
+// Gripper
+// =====================================================
+
+
+float gripperADC =
+readFilteredADC(
+POT_GRIPPER,
+filteredGripper
+);
+
+
+
+if(isADCValid(gripperADC))
+{
+
+    gripperErrorCount=0;
+
+
+    if(abs(gripperADC-lastGripperADC)>ADC_DEAD_ZONE)
+    {
+
+        lastGripperADC=gripperADC;
+
+
+
+        targetGripper =
+        convertToAngle(
+            gripperADC,
+            GRIPPER_POT_MIN,
+            GRIPPER_POT_MAX,
+            GRIPPER_SERVO_MIN,
+            GRIPPER_SERVO_MAX,
+            GRIPPER_REVERSED,
+            GRIPPER_OFFSET
+        );
+
+    }
+
+}
+
+else
+{
+
+    gripperErrorCount++;
+
+
+    if(gripperErrorCount>=MAX_ERROR_COUNT)
+    {
+
+        targetGripper =
+        currentGripper;
+
+    }
+
+}
+
+
+}
+
+
+
+
+
+
+
 // ========================================================
-// ㉑ 保存当前位置
+// 保存当前位置
 // ========================================================
 
 void savePositions()
 {
+
     preferences.putFloat(
         "base",
-        targetBase
+        currentBase
     );
+
 
     preferences.putFloat(
         "arm",
-        targetArm
+        currentArm
     );
+
 
     preferences.putFloat(
         "forearm",
-        targetForearm
+        currentForearm
     );
+
 
     preferences.putFloat(
         "gripper",
-        targetGripper
+        currentGripper
     );
 
-    lastSavedBase = targetBase;
-    lastSavedArm = targetArm;
-    lastSavedForearm = targetForearm;
-    lastSavedGripper = targetGripper;
+
+
+    lastSavedBase=currentBase;
+
+    lastSavedArm=currentArm;
+
+    lastSavedForearm=currentForearm;
+
+    lastSavedGripper=currentGripper;
+
 }
 
 
-// ========================================================
-// ㉒ 判断是否需要保存
-// ========================================================
+
+
 
 void checkSave()
 {
-    bool changed =
-        abs(targetBase - lastSavedBase) > SAVE_THRESHOLD ||
-        abs(targetArm - lastSavedArm) > SAVE_THRESHOLD ||
-        abs(targetForearm - lastSavedForearm) > SAVE_THRESHOLD ||
-        abs(targetGripper - lastSavedGripper) > SAVE_THRESHOLD;
 
 
-    if (changed)
+bool changed =
+
+abs(currentBase-lastSavedBase)>SAVE_THRESHOLD ||
+
+abs(currentArm-lastSavedArm)>SAVE_THRESHOLD ||
+
+abs(currentForearm-lastSavedForearm)>SAVE_THRESHOLD ||
+
+abs(currentGripper-lastSavedGripper)>SAVE_THRESHOLD;
+
+
+
+
+
+if(changed)
+{
+
+    if(lastTargetChangeTime==0)
     {
-        if (lastTargetChangeTime == 0)
-        {
-            lastTargetChangeTime = millis();
-        }
-
-        if (
-            millis() - lastTargetChangeTime
-            >= SAVE_DELAY
-        )
-        {
-            savePositions();
-
-            lastTargetChangeTime = 0;
-        }
+        lastTargetChangeTime=millis();
     }
-    else
+
+
+
+    if(
+    millis()-lastTargetChangeTime
+    >=SAVE_DELAY
+    )
     {
-        lastTargetChangeTime = 0;
+
+        savePositions();
+
+        lastTargetChangeTime=0;
+
     }
+
+}
+
+else
+{
+
+    lastTargetChangeTime=0;
+
 }
 
 
+}
+
 // ========================================================
-// ㉓ LED快速闪烁
+// LED快速闪烁
 // ========================================================
 
 void updateFastBlink()
 {
-    if (
-        millis() - ledTimer
-        >= LED_BLINK_INTERVAL
+
+    if(
+        millis()-ledTimer
+        >=LED_BLINK_INTERVAL
     )
     {
-        ledTimer = millis();
 
-        ledState = !ledState;
+        ledTimer =
+        millis();
+
+
+        ledState =
+        !ledState;
+
 
         digitalWrite(
             LED_PIN,
             ledState
         );
+
     }
+
 }
 
 
+
+
+
 // ========================================================
-// ㉔ 按钮检测
+// 按钮检测
 // ========================================================
 
 bool buttonPressed()
 {
-    bool currentState =
-        digitalRead(BUTTON_PIN);
 
-    bool pressed = false;
+    bool state =
+    digitalRead(BUTTON_PIN);
 
-    if (
-        currentState == LOW &&
-        lastButtonState == HIGH
+
+
+    bool pressed =
+    false;
+
+
+
+    if(
+        state==LOW &&
+        lastButtonState==HIGH
     )
     {
-        if (
-            millis() - lastButtonTime
-            > BUTTON_DEBOUNCE
+
+        if(
+            millis()-lastButtonTime
+            >BUTTON_DEBOUNCE
         )
         {
-            pressed = true;
 
-            lastButtonTime = millis();
+            pressed=true;
+
+
+            lastButtonTime=
+            millis();
+
         }
+
     }
 
-    lastButtonState = currentState;
+
+
+    lastButtonState=
+    state;
+
+
 
     return pressed;
+
 }
 
 
+
+
+
 // ========================================================
-// ㉕ 开始启动
+// 启动系统
 // ========================================================
 
 void startSystem()
 {
-    systemState = STARTING;
 
-    stateStartTime = millis();
+    systemState =
+    STARTING;
 
-    ledTimer = millis();
 
-    ledState = false;
+    stateStartTime =
+    millis();
+
+
+    ledTimer =
+    millis();
+
+
+    ledState =
+    false;
+
+
 
     Serial.println();
-    Serial.println("==============================");
-    Serial.println(" SYSTEM STARTING");
-    Serial.println("==============================");
+    Serial.println("================");
+    Serial.println(" SYSTEM START ");
+    Serial.println("================");
+
 }
 
 
+
+
+
 // ========================================================
-// ㉖ 开始复位
+// 复位系统
 // ========================================================
 
 void resetSystem()
 {
-    systemState = RESETTING;
 
-    stateStartTime = millis();
-
-    ledTimer = millis();
-
-    ledState = false;
+    systemState =
+    RESETTING;
 
 
-    // 设置复位目标
-    targetBase = RESET_BASE;
-    targetArm = RESET_ARM;
-    targetForearm = RESET_FOREARM;
-    targetGripper = RESET_GRIPPER;
+    stateStartTime =
+    millis();
+
+
+    ledTimer =
+    millis();
+
+
+    ledState =
+    false;
+
+
+
+
+    targetBase =
+    RESET_BASE;
+
+
+    targetArm =
+    RESET_ARM;
+
+
+    targetForearm =
+    RESET_FOREARM;
+
+
+    targetGripper =
+    RESET_GRIPPER;
+
 
 
     Serial.println();
-    Serial.println("==============================");
-    Serial.println(" SYSTEM RESET");
-    Serial.println("==============================");
+    Serial.println("================");
+    Serial.println(" SYSTEM RESET ");
+    Serial.println("================");
+
 }
 
 
+
+
+
 // ========================================================
-// ㉗ setup
+// setup
 // ========================================================
 
 void setup()
 {
+
     Serial.begin(115200);
 
 
-    // ---------- ADC ----------
+
     analogReadResolution(12);
 
 
-    // ---------- 按钮 ----------
+
+
+
+    //按钮
+
     pinMode(
         BUTTON_PIN,
         INPUT_PULLUP
     );
 
 
-    // ---------- LED ----------
+
+
+
+    //LED
+
     pinMode(
         LED_PIN,
         OUTPUT
     );
+
 
     digitalWrite(
         LED_PIN,
@@ -764,287 +1357,446 @@ void setup()
     );
 
 
-    // ---------- 舵机 ----------
+
+
+
+
+
+    //舵机
+
     servoBase.attach(
         SERVO_BASE
     );
+
 
     servoArm.attach(
         SERVO_ARM
     );
 
+
     servoForearm.attach(
         SERVO_FOREARM
     );
+
 
     servoGripper.attach(
         SERVO_GRIPPER
     );
 
 
-    // ---------- Flash ----------
+
+
+
+
+
+    //Flash
+
     preferences.begin(
-        "arm",
+        "robotarm",
         false
     );
 
 
-    // 读取上一次保存的位置
+
+
+
     targetBase =
-        preferences.getFloat(
-            "base",
-            RESET_BASE
-        );
+    preferences.getFloat(
+        "base",
+        RESET_BASE
+    );
+
 
     targetArm =
-        preferences.getFloat(
-            "arm",
-            RESET_ARM
-        );
+    preferences.getFloat(
+        "arm",
+        RESET_ARM
+    );
+
 
     targetForearm =
-        preferences.getFloat(
-            "forearm",
-            RESET_FOREARM
-        );
+    preferences.getFloat(
+        "forearm",
+        RESET_FOREARM
+    );
+
 
     targetGripper =
-        preferences.getFloat(
-            "gripper",
-            RESET_GRIPPER
-        );
+    preferences.getFloat(
+        "gripper",
+        RESET_GRIPPER
+    );
 
 
-    // 当前角度先设置为保存的位置
-    currentBase = targetBase;
-    currentArm = targetArm;
-    currentForearm = targetForearm;
-    currentGripper = targetGripper;
 
 
-    // 舵机输出
+
+
+
+    currentBase =
+    targetBase;
+
+
+    currentArm =
+    targetArm;
+
+
+    currentForearm =
+    targetForearm;
+
+
+    currentGripper =
+    targetGripper;
+
+
+
+
+
+
+
     servoBase.write(
         round(currentBase)
     );
+
 
     servoArm.write(
         round(currentArm)
     );
 
+
     servoForearm.write(
         round(currentForearm)
     );
+
 
     servoGripper.write(
         round(currentGripper)
     );
 
 
-    lastSavedBase = targetBase;
-    lastSavedArm = targetArm;
-    lastSavedForearm = targetForearm;
-    lastSavedGripper = targetGripper;
+
+
+
+
+
+    lastSavedBase =
+    currentBase;
+
+
+    lastSavedArm =
+    currentArm;
+
+
+    lastSavedForearm =
+    currentForearm;
+
+
+    lastSavedGripper =
+    currentGripper;
+
+
+
 
 
     Serial.println();
     Serial.println("==============================");
-    Serial.println(" Master Slave Robotic Arm");
+    Serial.println(" ESP32 MASTER SLAVE ARM ");
     Serial.println("==============================");
-    Serial.println("System: IDLE");
-    Serial.println("Press button to START");
-    Serial.println();
+
+    Serial.println("STATE : IDLE");
+
+    Serial.println("PRESS BUTTON");
+
 }
 
 
+
+
+
 // ========================================================
-// ㉘ loop
+// loop
 // ========================================================
 
 void loop()
 {
-    static unsigned long lastLoopTime = millis();
 
-    unsigned long now = millis();
-
-    float deltaTime =
-        (now - lastLoopTime) / 1000.0;
-
-    lastLoopTime = now;
+    static unsigned long lastTime =
+    millis();
 
 
-    // 防止极端情况下deltaTime过大
-    if (deltaTime > 0.1)
+
+    unsigned long now =
+    millis();
+
+
+
+    float dt =
+    (now-lastTime)/1000.0;
+
+
+
+    lastTime =
+    now;
+
+
+
+    if(dt>0.1)
     {
-        deltaTime = 0.1;
+        dt=0.1;
     }
 
 
-    // ====================================================
-    // IDLE
-    // ====================================================
 
-    if (systemState == IDLE)
+
+
+
+
+
+// ========================================================
+// IDLE
+// ========================================================
+
+if(systemState==IDLE)
+{
+
+    digitalWrite(
+        LED_PIN,
+        LOW
+    );
+
+
+
+    if(buttonPressed())
     {
+        startSystem();
+    }
+
+
+    return;
+
+}
+
+
+
+
+
+
+
+
+
+// ========================================================
+// STARTING
+// ========================================================
+
+if(systemState==STARTING)
+{
+
+    updateFastBlink();
+
+
+
+    if(
+    millis()-stateStartTime
+    >=SYSTEM_SEQUENCE_TIME
+    )
+    {
+
+        digitalWrite(
+            LED_PIN,
+            HIGH
+        );
+
+
+        systemState =
+        RUNNING;
+
+
+
+        Serial.println(
+        "SYSTEM READY"
+        );
+
+    }
+
+
+    return;
+
+}
+
+
+
+
+
+
+
+
+
+// ========================================================
+// RUNNING
+// ========================================================
+
+if(systemState==RUNNING)
+{
+
+    if(buttonPressed())
+    {
+
+        resetSystem();
+
+
+        return;
+
+    }
+
+
+
+
+    readMasterArm();
+
+
+
+    updateServos(dt);
+
+
+
+    checkSave();
+
+
+
+    return;
+
+}
+
+
+
+
+
+
+
+
+
+// ========================================================
+// RESETTING
+// ========================================================
+
+if(systemState==RESETTING)
+{
+
+    updateFastBlink();
+
+
+
+    updateServos(dt);
+
+
+
+
+
+    if(
+    millis()-stateStartTime
+    >=SYSTEM_SEQUENCE_TIME
+    )
+    {
+
+
+        currentBase =
+        RESET_BASE;
+
+
+        currentArm =
+        RESET_ARM;
+
+
+        currentForearm =
+        RESET_FOREARM;
+
+
+        currentGripper =
+        RESET_GRIPPER;
+
+
+
+
+
+
+        targetBase =
+        RESET_BASE;
+
+
+        targetArm =
+        RESET_ARM;
+
+
+        targetForearm =
+        RESET_FOREARM;
+
+
+        targetGripper =
+        RESET_GRIPPER;
+
+
+
+
+
+
+        servoBase.write(
+            RESET_BASE
+        );
+
+
+        servoArm.write(
+            RESET_ARM
+        );
+
+
+        servoForearm.write(
+            RESET_FOREARM
+        );
+
+
+        servoGripper.write(
+            RESET_GRIPPER
+        );
+
+
+
+
+
+        savePositions();
+
+
+
+
+
         digitalWrite(
             LED_PIN,
             LOW
         );
 
 
-        if (buttonPressed())
-        {
-            startSystem();
-        }
 
 
-        return;
-    }
+        systemState =
+        IDLE;
 
 
-    // ====================================================
-    // STARTING
-    // ====================================================
 
-    if (systemState == STARTING)
-    {
-        updateFastBlink();
+        Serial.println();
 
-
-        // 3秒自检
-        if (
-            millis() - stateStartTime
-            >= SYSTEM_SEQUENCE_TIME
-        )
-        {
-            digitalWrite(
-                LED_PIN,
-                HIGH
-            );
-
-
-            systemState = RUNNING;
-
-
-            Serial.println();
-            Serial.println("SYSTEM READY");
-            Serial.println("SYSTEM RUNNING");
-            Serial.println();
-        }
-
-
-        return;
-    }
-
-
-    // ====================================================
-    // RUNNING
-    // ====================================================
-
-    if (systemState == RUNNING)
-    {
-        // 再次按按钮 → 复位
-        if (buttonPressed())
-        {
-            resetSystem();
-
-            return;
-        }
-
-
-        // 读取主机械臂
-        readMasterArm();
-
-
-        // 平滑控制从机械臂
-        updateServos(
-            deltaTime
+        Serial.println(
+        "RESET COMPLETE"
         );
 
-
-        // 保存目标位置
-        checkSave();
-
-
-        return;
-    }
-
-
-    // ====================================================
-    // RESETTING
-    // ====================================================
-
-    if (systemState == RESETTING)
-    {
-        // LED快速闪烁
-        updateFastBlink();
-
-
-        // 机械臂向复位位置移动
-        updateServos(
-            deltaTime
+        Serial.println(
+        "STATE IDLE"
         );
 
-
-        // 3秒结束
-        if (
-            millis() - stateStartTime
-            >= SYSTEM_SEQUENCE_TIME
-        )
-        {
-            // 确保最终位置准确
-            currentBase = RESET_BASE;
-            currentArm = RESET_ARM;
-            currentForearm = RESET_FOREARM;
-            currentGripper = RESET_GRIPPER;
-
-
-            targetBase = RESET_BASE;
-            targetArm = RESET_ARM;
-            targetForearm = RESET_FOREARM;
-            targetGripper = RESET_GRIPPER;
-
-
-            servoBase.write(
-                RESET_BASE
-            );
-
-            servoArm.write(
-                RESET_ARM
-            );
-
-            servoForearm.write(
-                RESET_FOREARM
-            );
-
-            servoGripper.write(
-                RESET_GRIPPER
-            );
-
-
-            // 保存复位位置
-            savePositions();
-
-
-            // LED关闭
-            digitalWrite(
-                LED_PIN,
-                LOW
-            );
-
-
-            // 回到待机
-            systemState = IDLE;
-
-
-            Serial.println();
-            Serial.println("==============================");
-            Serial.println(" RESET COMPLETE");
-            Serial.println(" System: IDLE");
-            Serial.println("==============================");
-            Serial.println();
-        }
-
-
-        return;
     }
+
+
+    return;
+
+}
+
+
 }
