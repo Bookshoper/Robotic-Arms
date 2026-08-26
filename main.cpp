@@ -2,6 +2,8 @@
 #include <ESP32Servo.h>
 #include <Preferences.h>
 
+#include <WiFi.h>
+#include <WebServer.h>
 
 /*
 ===========================================================
@@ -85,6 +87,26 @@ Servo servoGripper;
 Preferences preferences;
 
 
+// ========================================================
+// WiFi AP
+// ========================================================
+
+
+const char* AP_SSID =
+"ESP32-RobotArm";
+
+
+const char* AP_PASSWORD =
+"12345678";
+
+
+
+WebServer server(80);
+
+
+
+// 网页刷新数据
+String systemStatus="IDLE";
 
 
 
@@ -1312,6 +1334,326 @@ void resetSystem()
 }
 
 
+// ========================================================
+// 网页主页
+// ========================================================
+
+
+void handleRoot()
+{
+
+String html = R"rawliteral(
+
+<!DOCTYPE html>
+
+<html>
+
+<head>
+
+<meta charset="UTF-8">
+
+<title>
+ESP32 Robot Arm
+</title>
+
+
+<style>
+
+body{
+
+font-family:Arial;
+
+background:#202124;
+
+color:white;
+
+text-align:center;
+
+}
+
+
+.card{
+
+background:#303134;
+
+margin:15px;
+
+padding:15px;
+
+border-radius:15px;
+
+}
+
+
+.value{
+
+font-size:25px;
+
+color:#00ff99;
+
+}
+
+
+</style>
+
+
+</head>
+
+
+<body>
+
+
+<h1>
+ESP32 Robot Arm
+</h1>
+
+
+
+<div class="card">
+
+<h2>
+System
+</h2>
+
+<div id="system">
+
+Loading...
+
+</div>
+
+</div>
+
+
+
+
+
+<div class="card">
+
+<h2>
+Servo Angle
+</h2>
+
+
+Base:
+
+<div class="value" id="base">
+
+</div>
+
+
+
+Arm:
+
+<div class="value" id="arm">
+
+</div>
+
+
+
+Forearm:
+
+<div class="value" id="forearm">
+
+</div>
+
+
+
+Gripper:
+
+<div class="value" id="gripper">
+
+</div>
+
+
+</div>
+
+
+
+
+
+<div class="card">
+
+<h2>
+ADC
+
+</h2>
+
+
+Base ADC:
+
+<div id="adcbase">
+
+</div>
+
+
+Arm ADC:
+
+<div id="adcar m">
+
+</div>
+
+
+Forearm ADC:
+
+<div id="adcforearm">
+
+</div>
+
+
+Gripper ADC:
+
+<div id="adcgripper">
+
+</div>
+
+
+</div>
+
+
+
+
+
+
+<script>
+
+
+function update(){
+
+
+fetch('/status')
+
+.then(response=>response.json())
+
+.then(data=>{
+
+
+document.getElementById("system").innerHTML=data.state;
+
+
+
+document.getElementById("base").innerHTML=
+data.base+"°";
+
+
+document.getElementById("arm").innerHTML=
+data.arm+"°";
+
+
+document.getElementById("forearm").innerHTML=
+data.forearm+"°";
+
+
+document.getElementById("gripper").innerHTML=
+data.gripper+"°";
+
+
+
+document.getElementById("adcbase").innerHTML=
+data.adcbase;
+
+
+document.getElementById("adcar m").innerHTML=
+data.adcarm;
+
+
+document.getElementById("adcforearm").innerHTML=
+data.adcforearm;
+
+
+document.getElementById("adcgripper").innerHTML=
+data.adcgripper;
+
+
+
+});
+
+
+}
+
+
+
+setInterval(update,500);
+
+
+</script>
+
+
+
+</body>
+
+</html>
+
+
+)rawliteral";
+
+
+
+server.send(
+200,
+"text/html",
+html
+);
+
+
+}
+
+
+
+
+
+
+// ========================================================
+// 返回JSON状态
+// ========================================================
+
+
+void handleStatus()
+{
+
+
+String json="{";
+
+
+json += "\"state\":\""+systemStatus+"\",";
+
+
+json += "\"base\":"+String(currentBase)+",";
+
+
+json += "\"arm\":"+String(currentArm)+",";
+
+
+json += "\"forearm\":"+String(currentForearm)+",";
+
+
+json += "\"gripper\":"+String(currentGripper)+",";
+
+
+json += "\"adcbase\":"+String(filteredBase)+",";
+
+
+json += "\"adcarm\":"+String(filteredArm)+",";
+
+
+json += "\"adcforearm\":"+String(filteredForearm)+",";
+
+
+json += "\"adcgripper\":"+String(filteredGripper);
+
+
+
+json += "}";
+
+
+
+server.send(
+200,
+"application/json",
+json
+);
+
+
+}
 
 
 
@@ -1324,6 +1666,59 @@ void setup()
 
     Serial.begin(115200);
 
+    // ========================================================
+    // WiFi AP启动
+    // ========================================================
+
+
+    WiFi.softAP(
+        AP_SSID,
+        AP_PASSWORD
+    );
+
+
+
+    Serial.println();
+
+    Serial.println(
+    "WiFi AP Started"
+    );
+
+
+    Serial.print(
+    "IP Address:"
+    );
+
+
+    Serial.println(
+    WiFi.softAPIP()
+    );
+
+
+
+
+
+    server.on(
+    "/",
+    handleRoot
+    );
+
+
+
+    server.on(
+    "/status",
+    handleStatus
+    );
+
+
+
+    server.begin();
+
+
+
+    Serial.println(
+    "Web Server Started"
+    );
 
 
     analogReadResolution(12);
@@ -1520,6 +1915,8 @@ void setup()
 void loop()
 {
 
+    server.handleClient();
+    
     static unsigned long lastTime =
     millis();
 
