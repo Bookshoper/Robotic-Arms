@@ -168,54 +168,99 @@ void readMasterArm() {
     updateChannel(POT_GRIPPER, filteredGripper, gripperErrorCount, targetGripper, currentGripper, CALIB_GRIPPER);
 }
 
-// 解析并执行 Python 传来的串口指令
+// ================== Python串口控制 ==================
+// 网页模式开关作为总权限控制
+// false = 电位器控制
+// true  = Python手势控制
+
 void checkSerialCommands() {
+
     if (Serial.available() > 0) {
         char cmd = Serial.read();
-        
-        // 过滤换行符
-        if (cmd == '\n' || cmd == '\r') return;
+        //过滤换行
+        if(cmd == '\n' || cmd == '\r')
+            return;
 
-        // 接收到动作指令，自动切入串口模式
-        if(cmd == 'S' || cmd == 'G' || cmd == 'U' || cmd == 'R') {
-            isSerialMode = true; 
+        // ==============================
+        // 总开关保护
+        // 网页没有打开Python模式
+        // 禁止任何串口控制
+        // ==============================
+
+        if(!isSerialMode)
+        {
+            Serial.println(
+            "Serial Command Blocked (Manual Mode)"
+            );
+            return;
         }
 
-        switch (cmd) {
-            case 'S': // Stop/Reset 归位
+
+        // ==============================
+        // Python控制模式
+        // ==============================
+
+        switch(cmd)
+        {
+            // 复位
+            case 'S':
+
                 targetBase = RESET_BASE;
                 targetArm = RESET_ARM;
                 targetForearm = RESET_FOREARM;
                 targetGripper = RESET_GRIPPER;
-                Serial.println("Serial Cmd: [S] - Resetting");
+
+                Serial.println(
+                "Python: Reset"
+                );
+
                 break;
-                
-            case 'G': // Grab 闭合爪子
+
+            // 抓取
+            case 'G':
+
                 targetGripper = 120;
-                Serial.println("Serial Cmd: [G] - Gripper Closed");
+
+                Serial.println(
+                "Python: Grab"
+                );
+
                 break;
-                
-            case 'U': // Up 抬起大臂
-                targetArm = 150; 
-                Serial.println("Serial Cmd: [U] - Arm Up");
-                break;
-                
-            case 'R': // Release 松开爪子
+
+            // 松开
+            case 'R':
+
                 targetGripper = 20;
-                Serial.println("Serial Cmd: [R] - Gripper Released");
+
+                Serial.println(
+                "Python: Release"
+                );
+
                 break;
-                
-            case 'M': // Manual 强制切回电位器控制
-                isSerialMode = false;
-                Serial.println("Serial Cmd: [M] - Switched to Manual Mode");
+
+            // 抬臂
+            case 'U':
+
+                targetArm = 150;
+
+                Serial.println(
+                "Python: Arm Up"
+                );
+
                 break;
-                
+
             default:
-                Serial.print("Unknown Command: ");
+
+                Serial.print(
+                "Unknown Python CMD:"
+                );
                 Serial.println(cmd);
                 break;
+
         }
+
     }
+
 }
 
 void savePositions() {
@@ -278,18 +323,31 @@ void startSystem() {
 }
 
 void resetSystem() {
+
     systemState = RESETTING;
     systemStatus = "RESETTING";
     stateStartTime = millis();
     ledTimer = millis();
     ledState = false;
-    isSerialMode = false; // 复位时自动切回电位器控制
+
+
+    // 复位后强制回手动模式
+
+    isSerialMode = false;
 
     targetBase = RESET_BASE;
+
     targetArm = RESET_ARM;
+
     targetForearm = RESET_FOREARM;
+
     targetGripper = RESET_GRIPPER;
-    Serial.println("\n================\n SYSTEM RESET \n================");
+
+
+    Serial.println(
+    "SYSTEM RESET -> MANUAL MODE"
+    );
+
 }
 
 // ================== Web 服务相关 ==================
@@ -326,7 +384,48 @@ input:checked + .slider:before { transform: translateX(26px); }
 <h1>🤖 ESP32 Robot Arm</h1>
 
 <div class="card">
-    <div class="title">Control Mode</div>
+
+<div class="title">
+Control Mode (Master Switch)
+</div>
+
+
+<div class="switch-container">
+
+
+<span id="lbl-manual"
+class="mode-label active-manual">
+ADC Manual
+</span>
+
+
+<label class="switch">
+
+<input type="checkbox"
+id="mode-switch"
+onchange="toggleMode()">
+
+<span class="slider"></span>
+
+</label>
+
+
+<span id="lbl-serial"
+class="mode-label inactive">
+Python Gesture
+</span>
+
+
+</div>
+
+
+<div id="mode-info"
+style="font-size:22px;margin-top:10px;">
+Current: ADC Manual
+</div>
+
+
+</div>
     <div class="switch-container">
         <span id="lbl-manual" class="mode-label active-manual">ADC Manual</span>
         <label class="switch">
@@ -360,10 +459,16 @@ input:checked + .slider:before { transform: translateX(26px); }
 
 <script>
 function toggleMode(){
-    let isSerial = document.getElementById('mode-switch').checked;
-    fetch('/set_mode?mode=' + (isSerial ? 'serial' : 'manual'));
-}
 
+    let isSerial =
+    document.getElementById('mode-switch').checked;
+
+
+    fetch('/set_mode?mode=' 
+    + (isSerial ? 'serial' : 'manual'));
+
+
+}
 function updateData(){
     fetch('/status')
     .then(response=>response.json())
@@ -380,11 +485,38 @@ function updateData(){
         }
         
         if(data.is_serial === 1){
-            lblMan.className = "mode-label inactive";
-            lblSer.className = "mode-label active-serial";
-        } else {
-            lblMan.className = "mode-label active-manual";
-            lblSer.className = "mode-label inactive";
+
+
+        lblMan.className =
+        "mode-label inactive";
+
+
+        lblSer.className =
+        "mode-label active-serial";
+
+
+        document.getElementById("mode-info")
+        .innerHTML =
+        "Current: Python Gesture Control";
+
+
+        }
+        else{
+
+
+        lblMan.className =
+        "mode-label active-manual";
+
+
+        lblSer.className =
+        "mode-label inactive";
+
+
+        document.getElementById("mode-info")
+        .innerHTML =
+        "Current: ADC Manual Control";
+
+
         }
 
         document.getElementById("base").innerHTML=data.base.toFixed(1)+"°";
@@ -405,18 +537,48 @@ setInterval(updateData, 500);
 }
 
 // 接收网页发来的切换请求
-void handleSetMode() {
-    if (server.hasArg("mode")) {
-        String mode = server.arg("mode");
-        if (mode == "serial") {
+// ==============================
+// 网页总控制开关
+// ==============================
+
+void handleSetMode(){
+
+    if(server.hasArg("mode")){
+
+        String mode =
+        server.arg("mode");
+
+        if(mode=="serial"){
+
             isSerialMode = true;
-            Serial.println("Web: Switched to Serial Mode");
-        } else if (mode == "manual") {
-            isSerialMode = false;
-            Serial.println("Web: Switched to Manual Mode");
+
+            Serial.println(
+            "MODE -> PYTHON GESTURE CONTROL"
+            );
+
         }
+
+
+        else if(mode=="manual"){
+
+            isSerialMode = false;
+
+            Serial.println(
+            "MODE -> ADC MANUAL CONTROL"
+            );
+
+        }
+
+
     }
-    server.send(200, "text/plain", "OK");
+
+
+    server.send(
+    200,
+    "text/plain",
+    "MODE UPDATED"
+    );
+
 }
 
 void handleStatus() {
@@ -490,6 +652,7 @@ void setup() {
     Serial.println("\n==============================\n ESP32 MASTER SLAVE ARM \n==============================");
     Serial.println("STATE : IDLE");
     Serial.println("PRESS BUTTON");
+    Serial.println("MODE : ADC MANUAL");
 }
 
 void loop() {
@@ -521,18 +684,50 @@ void loop() {
             break;
 
         case RUNNING:
+
+
             if(buttonPressed()) {
+
+
                 resetSystem();
+
                 break;
+
             }
-            
-            if (!isSerialMode) {
-                readMasterArm(); // 只有在 ADC 模式下，才读取电位器并更新 Target
+
+
+            // ===========================
+            // 控制权限判断
+            // ===========================
+
+
+            if(isSerialMode)
+            {
+
+                // Python手势控制
+
+                // 禁止ADC更新目标角度
+
+                // target由串口修改
+
             }
-            
+
+            else
+            {
+
+                // 电位器控制
+
+                readMasterArm();
+
+            }
+
+
             updateServos(dt);
+
             checkSave();
-            break;
+
+
+        break;
 
         case RESETTING:
             updateFastBlink();
