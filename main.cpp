@@ -5,21 +5,7 @@
 #include <WebServer.h>
 
 /*
- ESP32 主从机械臂控制系统 FINAL
-
- 功能：
-
- 1. 四自由度主从机械臂
- 2. 270°电位器匹配180°MG90S
- 3. ADC滤波
- 4. ADC死区
- 5. 杜邦线掉线保持当前位置
- 6. 舵机速度限制
- 7. 平滑运动
- 8. 按钮启动
- 9. 蓝灯状态提示
-10. 复位
-11. Flash保存实际位置
+ ESP32 主从机械臂控制系统 FINAL (包含 Web 控制模式切换)
 */
 
 // ================== GPIO 定义 ==================
@@ -53,6 +39,9 @@ String systemStatus = "IDLE";
 enum SystemState { IDLE, STARTING, RUNNING, RESETTING };
 SystemState systemState = IDLE;
 
+// 控制模式标志位 (false=电位器控制, true=串口Python控制)
+bool isSerialMode = false; 
+
 // ================== 物理参数设置 ==================
 const float RESET_BASE = 144;
 const float RESET_ARM = 83;
@@ -65,7 +54,7 @@ const float ARM_MAX_SPEED = 35;
 const float FOREARM_MAX_SPEED = 40;
 const float GRIPPER_MAX_SPEED = 80;
 
-// 电位器及舵机校准参数 (最小值, 最大值, 舵机最小, 舵机最大, 是否反转, 偏移)
+// 电位器及舵机校准参数
 int CALIB_BASE[6]    = {680, 3415, 0,  180, false, 0};
 int CALIB_ARM[6]     = {680, 3415, 0,  180, false, 0};
 int CALIB_FOREARM[6] = {680, 3415, 0,  180, false, 0};
@@ -79,7 +68,7 @@ float currentGripper = RESET_GRIPPER, targetGripper = RESET_GRIPPER;
 
 // ADC滤波及死区
 const float FILTER_ALPHA = 0.15;
-const float ANGLE_DEAD_ZONE = 1.0; // 角度变化大于1度才执行更新，抗抖动核心！
+const float ANGLE_DEAD_ZONE = 1.0; 
 
 float filteredBase = 0, filteredArm = 0, filteredForearm = 0, filteredGripper = 0;
 int baseErrorCount = 0, armErrorCount = 0, forearmErrorCount = 0, gripperErrorCount = 0;
@@ -121,9 +110,9 @@ bool isADCValid(float value) {
 float convertToAngle(float adc, int* calib) {
     adc = constrain(adc, calib[0], calib[1]);
     float angle;
-    if(!calib[4]) { // 不反转
+    if(!calib[4]) {
         angle = map((long)adc, calib[0], calib[1], calib[2], calib[3]);
-    } else { // 反转
+    } else {
         angle = map((long)adc, calib[0], calib[1], calib[3], calib[2]);
     }
     angle += calib[5];
@@ -161,14 +150,13 @@ void updateChannel(int pin, float &filteredADC, int &errorCount, float &targetAn
         errorCount = 0;
         float newTarget = convertToAngle(rawADC, calib);
         
-        // 角度滞回死区：只有变化超过阈值，才更新目标角度
         if(abs(newTarget - targetAngle) > ANGLE_DEAD_ZONE) {
             targetAngle = newTarget;
         }
     } else {
         errorCount++;
         if(errorCount >= MAX_ERROR_COUNT) {
-            targetAngle = currentAngle; // 掉线保护，保持当前位置
+            targetAngle = currentAngle; 
         }
     }
 }
@@ -178,6 +166,56 @@ void readMasterArm() {
     updateChannel(POT_ARM, filteredArm, armErrorCount, targetArm, currentArm, CALIB_ARM);
     updateChannel(POT_FOREARM, filteredForearm, forearmErrorCount, targetForearm, currentForearm, CALIB_FOREARM);
     updateChannel(POT_GRIPPER, filteredGripper, gripperErrorCount, targetGripper, currentGripper, CALIB_GRIPPER);
+}
+
+// 解析并执行 Python 传来的串口指令
+void checkSerialCommands() {
+    if (Serial.available() > 0) {
+        char cmd = Serial.read();
+        
+        // 过滤换行符
+        if (cmd == '\n' || cmd == '\r') return;
+
+        // 接收到动作指令，自动切入串口模式
+        if(cmd == 'S' || cmd == 'G' || cmd == 'U' || cmd == 'R') {
+            isSerialMode = true; 
+        }
+
+        switch (cmd) {
+            case 'S': // Stop/Reset 归位
+                targetBase = RESET_BASE;
+                targetArm = RESET_ARM;
+                targetForearm = RESET_FOREARM;
+                targetGripper = RESET_GRIPPER;
+                Serial.println("Serial Cmd: [S] - Resetting");
+                break;
+                
+            case 'G': // Grab 闭合爪子
+                targetGripper = 120;
+                Serial.println("Serial Cmd: [G] - Gripper Closed");
+                break;
+                
+            case 'U': // Up 抬起大臂
+                targetArm = 150; 
+                Serial.println("Serial Cmd: [U] - Arm Up");
+                break;
+                
+            case 'R': // Release 松开爪子
+                targetGripper = 20;
+                Serial.println("Serial Cmd: [R] - Gripper Released");
+                break;
+                
+            case 'M': // Manual 强制切回电位器控制
+                isSerialMode = false;
+                Serial.println("Serial Cmd: [M] - Switched to Manual Mode");
+                break;
+                
+            default:
+                Serial.print("Unknown Command: ");
+                Serial.println(cmd);
+                break;
+        }
+    }
 }
 
 void savePositions() {
@@ -245,6 +283,7 @@ void resetSystem() {
     stateStartTime = millis();
     ledTimer = millis();
     ledState = false;
+    isSerialMode = false; // 复位时自动切回电位器控制
 
     targetBase = RESET_BASE;
     targetArm = RESET_ARM;
@@ -254,265 +293,145 @@ void resetSystem() {
 }
 
 // ================== Web 服务相关 ==================
-
 void handleRoot() {
-
     String html = R"rawliteral(
 <!DOCTYPE html>
 <html>
 <head>
 <meta charset="UTF-8">
 <title>Robot Arm Monitor</title>
-
 <style>
-
-body{
-    margin:0;
-    background:#121212;
-    color:white;
-    font-family:"Arial";
-    text-align:center;
-}
-
-h1{
-    margin-top:25px;
-}
-
-.card{
-
-    background:#1e1e1e;
-    margin:15px auto;
-    padding:20px;
-    width:85%;
-    max-width:500px;
-    border-radius:20px;
-    box-shadow:0 0 15px #000;
-
-}
-
-
-.title{
-
-    font-size:22px;
-    color:#00e5ff;
-
-}
-
-
-.value{
-
-    font-size:30px;
-    color:#00ff88;
-    margin:8px;
-
-}
-
-
-.status{
-
-    font-size:35px;
-    color:#ffcc00;
-
-}
-
-
-.item{
-
-    display:flex;
-    justify-content:space-between;
-    font-size:20px;
-    margin:10px;
-
-}
-
-
+body{ margin:0; background:#121212; color:white; font-family:"Arial"; text-align:center; }
+h1{ margin-top:25px; }
+.card{ background:#1e1e1e; margin:15px auto; padding:20px; width:85%; max-width:500px; border-radius:20px; box-shadow:0 0 15px #000; }
+.title{ font-size:22px; color:#00e5ff; margin-bottom:15px;}
+.value{ font-size:30px; color:#00ff88; margin:8px; }
+.status{ font-size:35px; color:#ffcc00; }
+.item{ display:flex; justify-content:space-between; font-size:20px; margin:10px; }
+/* 开关样式 */
+.switch-container { display: flex; justify-content: center; align-items: center; margin: 15px 0; font-size: 18px;}
+.switch { position: relative; display: inline-block; width: 60px; height: 34px; margin: 0 15px; }
+.switch input { opacity: 0; width: 0; height: 0; }
+.slider { position: absolute; cursor: pointer; top: 0; left: 0; right: 0; bottom: 0; background-color: #4CAF50; transition: .4s; border-radius: 34px; }
+.slider:before { position: absolute; content: ""; height: 26px; width: 26px; left: 4px; bottom: 4px; background-color: white; transition: .4s; border-radius: 50%; }
+input:checked + .slider { background-color: #f44336; }
+input:checked + .slider:before { transform: translateX(26px); }
+.mode-label { font-weight: bold; transition: color 0.3s; }
+.active-manual { color: #4CAF50; }
+.active-serial { color: #f44336; }
+.inactive { color: #555; }
 </style>
-
-
 </head>
-
-
 <body>
-
-
 <h1>🤖 ESP32 Robot Arm</h1>
 
-
+<div class="card">
+    <div class="title">Control Mode</div>
+    <div class="switch-container">
+        <span id="lbl-manual" class="mode-label active-manual">ADC Manual</span>
+        <label class="switch">
+            <input type="checkbox" id="mode-switch" onchange="toggleMode()">
+            <span class="slider"></span>
+        </label>
+        <span id="lbl-serial" class="mode-label inactive">Python Serial</span>
+    </div>
+</div>
 
 <div class="card">
-
-<div class="title">
-System Status
+    <div class="title">System Status</div>
+    <div id="state" class="status">Loading...</div>
 </div>
-
-<div id="state" class="status">
-Loading...
-</div>
-
-</div>
-
-
 
 <div class="card">
-
-<div class="title">
-Servo Angle
+    <div class="title">Servo Angle</div>
+    <div class="item">Base<span id="base" class="value">0</span></div>
+    <div class="item">Arm<span id="arm" class="value">0</span></div>
+    <div class="item">Forearm<span id="forearm" class="value">0</span></div>
+    <div class="item">Gripper<span id="gripper" class="value">0</span></div>
 </div>
-
-
-<div class="item">
-Base
-<span id="base" class="value">0</span>
-</div>
-
-
-<div class="item">
-Arm
-<span id="arm" class="value">0</span>
-</div>
-
-
-<div class="item">
-Forearm
-<span id="forearm" class="value">0</span>
-</div>
-
-
-<div class="item">
-Gripper
-<span id="gripper" class="value">0</span>
-</div>
-
-
-</div>
-
-
-
-
 
 <div class="card">
-
-<div class="title">
-Potentiometer ADC
+    <div class="title">Potentiometer ADC</div>
+    <div class="item">Base<span id="adcbase" class="value">0</span></div>
+    <div class="item">Arm<span id="adcarm" class="value">0</span></div>
+    <div class="item">Forearm<span id="adcforearm" class="value">0</span></div>
+    <div class="item">Gripper<span id="adcgripper" class="value">0</span></div>
 </div>
-
-
-<div class="item">
-Base
-<span id="adcbase" class="value">0</span>
-</div>
-
-
-<div class="item">
-Arm
-<span id="adcarm" class="value">0</span>
-</div>
-
-
-<div class="item">
-Forearm
-<span id="adcforearm" class="value">0</span>
-</div>
-
-
-<div class="item">
-Gripper
-<span id="adcgripper" class="value">0</span>
-</div>
-
-
-
-</div>
-
-
 
 <script>
-
-
-function updateData(){
-
-fetch('/status')
-
-.then(response=>response.json())
-
-.then(data=>{
-
-
-document.getElementById("state").innerHTML=data.state;
-
-
-document.getElementById("base").innerHTML=
-data.base.toFixed(1)+"°";
-
-
-document.getElementById("arm").innerHTML=
-data.arm.toFixed(1)+"°";
-
-
-document.getElementById("forearm").innerHTML=
-data.forearm.toFixed(1)+"°";
-
-
-document.getElementById("gripper").innerHTML=
-data.gripper.toFixed(1)+"°";
-
-
-
-document.getElementById("adcbase").innerHTML=
-data.adcbase.toFixed(0);
-
-
-document.getElementById("adcarm").innerHTML=
-data.adcarm.toFixed(0);
-
-
-document.getElementById("adcforearm").innerHTML=
-data.adcforearm.toFixed(0);
-
-
-document.getElementById("adcgripper").innerHTML=
-data.adcgripper.toFixed(0);
-
-
-
-});
-
-
+function toggleMode(){
+    let isSerial = document.getElementById('mode-switch').checked;
+    fetch('/set_mode?mode=' + (isSerial ? 'serial' : 'manual'));
 }
 
+function updateData(){
+    fetch('/status')
+    .then(response=>response.json())
+    .then(data=>{
+        document.getElementById("state").innerHTML=data.state;
+        
+        // 同步开关状态
+        let sw = document.getElementById('mode-switch');
+        let lblMan = document.getElementById('lbl-manual');
+        let lblSer = document.getElementById('lbl-serial');
+        
+        if(sw.checked !== (data.is_serial === 1)) {
+            sw.checked = (data.is_serial === 1);
+        }
+        
+        if(data.is_serial === 1){
+            lblMan.className = "mode-label inactive";
+            lblSer.className = "mode-label active-serial";
+        } else {
+            lblMan.className = "mode-label active-manual";
+            lblSer.className = "mode-label inactive";
+        }
 
-
-setInterval(updateData,500);
-
-
+        document.getElementById("base").innerHTML=data.base.toFixed(1)+"°";
+        document.getElementById("arm").innerHTML=data.arm.toFixed(1)+"°";
+        document.getElementById("forearm").innerHTML=data.forearm.toFixed(1)+"°";
+        document.getElementById("gripper").innerHTML=data.gripper.toFixed(1)+"°";
+        document.getElementById("adcbase").innerHTML=data.adcbase.toFixed(0);
+        document.getElementById("adcarm").innerHTML=data.adcarm.toFixed(0);
+        document.getElementById("adcforearm").innerHTML=data.adcforearm.toFixed(0);
+        document.getElementById("adcgripper").innerHTML=data.adcgripper.toFixed(0);
+    });
+}
+setInterval(updateData, 500);
 </script>
-
-
-
-</body>
-</html>
-
+</body></html>
 )rawliteral";
+    server.send(200,"text/html",html);
+}
 
-
-server.send(200,"text/html",html);
-
+// 接收网页发来的切换请求
+void handleSetMode() {
+    if (server.hasArg("mode")) {
+        String mode = server.arg("mode");
+        if (mode == "serial") {
+            isSerialMode = true;
+            Serial.println("Web: Switched to Serial Mode");
+        } else if (mode == "manual") {
+            isSerialMode = false;
+            Serial.println("Web: Switched to Manual Mode");
+        }
+    }
+    server.send(200, "text/plain", "OK");
 }
 
 void handleStatus() {
-    char json[256];
+    char json[350]; // 加大字符缓冲防止溢出
     snprintf(json, sizeof(json), 
-        "{\"state\":\"%s\",\"base\":%.1f,\"arm\":%.1f,\"forearm\":%.1f,\"gripper\":%.1f,\"adcbase\":%.1f,\"adcarm\":%.1f,\"adcforearm\":%.1f,\"adcgripper\":%.1f}",
-        systemStatus.c_str(), currentBase, currentArm, currentForearm, currentGripper, 
+        "{\"state\":\"%s\",\"is_serial\":%d,\"base\":%.1f,\"arm\":%.1f,\"forearm\":%.1f,\"gripper\":%.1f,\"adcbase\":%.1f,\"adcarm\":%.1f,\"adcforearm\":%.1f,\"adcgripper\":%.1f}",
+        systemStatus.c_str(), isSerialMode ? 1 : 0, currentBase, currentArm, currentForearm, currentGripper, 
         filteredBase, filteredArm, filteredForearm, filteredGripper);
     server.send(200, "application/json", json);
 }
 
-// 独立的 WiFi 任务运行在 Core 0
 void webServerTaskFunc(void *pvParameters) {
     for (;;) {
         server.handleClient();
-        vTaskDelay(10 / portTICK_PERIOD_MS); // 释放CPU，防止看门狗复位
+        vTaskDelay(10 / portTICK_PERIOD_MS); 
     }
 }
 
@@ -526,9 +445,9 @@ void setup() {
 
     server.on("/", handleRoot);
     server.on("/status", handleStatus);
+    server.on("/set_mode", handleSetMode); // 注册切换模式接口
     server.begin();
     
-    // 在 Core 0 上启动 WebServer 任务
     xTaskCreatePinnedToCore(webServerTaskFunc, "WebServerTask", 4096, NULL, 1, &WebServerTask, 0);
 
     analogReadResolution(12);
@@ -537,10 +456,20 @@ void setup() {
     pinMode(LED_PIN, OUTPUT);
     digitalWrite(LED_PIN, LOW);
 
-    servoBase.attach(SERVO_BASE);
-    servoArm.attach(SERVO_ARM);
-    servoForearm.attach(SERVO_FOREARM);
-    servoGripper.attach(SERVO_GRIPPER);
+    ESP32PWM::allocateTimer(0);
+    ESP32PWM::allocateTimer(1);
+    ESP32PWM::allocateTimer(2);
+    ESP32PWM::allocateTimer(3);
+
+    servoBase.setPeriodHertz(50);
+    servoArm.setPeriodHertz(50);
+    servoForearm.setPeriodHertz(50);
+    servoGripper.setPeriodHertz(50);
+
+    servoBase.attach(SERVO_BASE, 500, 2500);
+    servoArm.attach(SERVO_ARM, 500, 2500);
+    servoForearm.attach(SERVO_FOREARM, 500, 2500);
+    servoGripper.attach(SERVO_GRIPPER, 500, 2500);
 
     preferences.begin("robotarm", false);
     currentBase = targetBase = preferences.getFloat("base", RESET_BASE);
@@ -570,6 +499,11 @@ void loop() {
     lastTime = now;
     if(dt > 0.1) dt = 0.1;
 
+    // 任何状态下接收串口指令
+    if(systemState == RUNNING || systemState == IDLE) {
+        checkSerialCommands();
+    }
+
     switch(systemState) {
         case IDLE:
             digitalWrite(LED_PIN, LOW);
@@ -591,7 +525,11 @@ void loop() {
                 resetSystem();
                 break;
             }
-            readMasterArm();
+            
+            if (!isSerialMode) {
+                readMasterArm(); // 只有在 ADC 模式下，才读取电位器并更新 Target
+            }
+            
             updateServos(dt);
             checkSave();
             break;
@@ -619,6 +557,5 @@ void loop() {
             break;
     }
     
-    // Core 1 延时，保持控制循环的稳定性 (~100Hz)
     vTaskDelay(10 / portTICK_PERIOD_MS); 
 }
