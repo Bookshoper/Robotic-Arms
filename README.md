@@ -7,3 +7,6 @@ with ESP32, four motos and some sensors.
 
 此外，通过ESP32 WiFi建立网页服务器，实现机械臂状态监控和控制模式切换，可以在电位器控制模式和Python串口手势控制模式之间切换。
 系统还利用Preferences库保存舵机位置，实现断电保存。
+
+
+增加手势识别
