@@ -1,125 +1,132 @@
 import cv2
+import time
+import serial
 import mediapipe as mp
 from mediapipe.tasks import python
 from mediapipe.tasks.python import vision
-import serial
-import time
-from collections import deque
 
-# ================= 1. 配置串口 =================
-# ⚠️ 请根据实际情况修改 'COM'，如果你没有连接机械臂，它会以测试模式运行
-SERIAL_PORT = 'COM4' 
+# ================= 1. 串口配置 =================
+SERIAL_PORT = 'COM4'  # ⚠️ 请确保这里和你的 ESP32 端口一致
 BAUD_RATE = 115200
 
 try:
     ser = serial.Serial(SERIAL_PORT, BAUD_RATE, timeout=1)
-    print(f"成功连接到串口 {SERIAL_PORT}")
+    print(f"成功连接串口 {SERIAL_PORT}")
 except Exception as e:
     ser = None
-    print(f"⚠️ 串口未连接，将以无硬件测试模式运行！(错误: {e})")
+    print(f"⚠️ 串口未连接，处于无硬件测试模式: {e}")
 
-# ================= 2. 映射字典 =================
-GESTURE_CMD_MAP = {
-    'Open_Palm': 'S',   # 张开手掌 -> 待机/停止
-    'Closed_Fist': 'G', # 握拳 -> 抓取
-    'Pointing_Up': 'U', # 食指上举 -> 抬升
-    'Victory': 'R',     # V字手势 -> 旋转
-    'None': 'S'         # 未识别到手 -> 待机/停止
-}
-
-# ================= 3. 初始化 MediaPipe =================
+# ================= 2. 初始化 Gesture Recognizer Task 模型 =================
 base_options = python.BaseOptions(model_asset_path='gesture_recognizer.task')
-options = vision.GestureRecognizerOptions(base_options=base_options)
+options = vision.GestureRecognizerOptions(
+    base_options=base_options,
+    running_mode=vision.RunningMode.IMAGE,
+    num_hands=1
+)
 recognizer = vision.GestureRecognizer.create_from_options(options)
 
-# ================= 4. 初始化摄像头与防抖 =================
-cap = cv2.VideoCapture(0) # 0通常是笔记本自带摄像头
-cap.set(cv2.CAP_PROP_FRAME_WIDTH, 640)
-cap.set(cv2.CAP_PROP_FRAME_HEIGHT, 480)
+# ================= 3. 防抖与延迟检测参数 =================
+cap = cv2.VideoCapture(0)
 
-# 用于稳定性判断，保存最近5帧的手势结果
-STABILITY_FRAMES = 5
-gesture_history = deque(maxlen=STABILITY_FRAMES)
-last_sent_cmd = 'S' # 记录上次发送的指令，避免重复发送
+last_sent_cmd = None         # 记录最终发送给 ESP32 的指令
+candidate_cmd = None         # 当前正在检测的“候选”指令
+candidate_start_time = 0     # 候选指令开始计时的时间
+STABILITY_TIME = 0.5         # 延迟检测时间 (0.5秒 = 500ms)
 
-print("启动摄像头... 按下 'q' 键退出程序。")
+print("系统启动：带 500ms 防抖检测 & 瞬间急停机制")
+print("张开=开爪 | 握拳=握爪 | 1指=下 | 2指=上 | 3指=左转 | 4指=右转 | 无手势=急停(S)")
 
 while cap.isOpened():
     ret, frame = cap.read()
     if not ret:
         break
         
-    # 镜像翻转画面，符合照镜子的直觉
     frame = cv2.flip(frame, 1)
-    
-    # 转换颜色空间：OpenCV 默认 BGR，MediaPipe 需要 RGB
     rgb_frame = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
     mp_image = mp.Image(image_format=mp.ImageFormat.SRGB, data=rgb_frame)
-
-    # 进行手势识别
     recognition_result = recognizer.recognize(mp_image)
-    
-    current_gesture = "None"
-    
-    # 解析识别结果
-    if recognition_result.gestures:
-        # 获取得分最高的手势名称
-        top_gesture = recognition_result.gestures[0][0].category_name
-        if top_gesture in GESTURE_CMD_MAP:
-            current_gesture = top_gesture
-            
-            # 画出手的关键点连线（仅做视觉反馈）
-            if recognition_result.hand_landmarks:
-                landmarks = recognition_result.hand_landmarks[0]
-                for mark in landmarks:
-                    x = int(mark.x * frame.shape[1])
-                    y = int(mark.y * frame.shape[0])
-                    cv2.circle(frame, (x, y), 3, (0, 255, 0), -1)
 
-    # --- 核心逻辑：稳定性判断 ---
-    gesture_history.append(current_gesture)
-    target_cmd = 'S' # 默认安全停止指令
-    
-    # 如果没手，立刻强制切断/停止 (安全第一)
-    if current_gesture == "None":
-        target_cmd = 'S'
-        stable_gesture_name = "None (Stop)"
-    # 如果最近5帧识别结果一模一样，说明手势稳定了
-    elif len(gesture_history) == STABILITY_FRAMES and len(set(gesture_history)) == 1:
-        stable_gesture = gesture_history[0]
-        target_cmd = GESTURE_CMD_MAP[stable_gesture]
-        stable_gesture_name = stable_gesture
+    raw_cmd = None
+    base_cmd_text = ""
+
+    # ================= 4. 识别手势 =================
+    if recognition_result.gestures and recognition_result.hand_landmarks:
+        gesture_category = recognition_result.gestures[0][0].category_name
+        landmarks = recognition_result.hand_landmarks[0]
+
+        h, w, _ = frame.shape
+        for mark in landmarks:
+            cx, cy = int(mark.x * w), int(mark.y * h)
+            cv2.circle(frame, (cx, cy), 3, (0, 255, 0), -1)
+
+        tips = [8, 12, 16, 20]
+        pips = [6, 10, 14, 18]
+        up_count = sum([1 for tip, pip in zip(tips, pips) if landmarks[tip].y < landmarks[pip].y])
+
+        if gesture_category == "Closed_Fist":
+            raw_cmd, base_cmd_text = 'O', "Fist -> Close (握爪)"
+        elif gesture_category == "Open_Palm":
+            raw_cmd, base_cmd_text = 'C', "Open -> Open (开爪)"
+        elif up_count == 1:
+            raw_cmd, base_cmd_text = 'U', "1 Finger -> Down (向下)"
+        elif up_count == 2:
+            raw_cmd, base_cmd_text = 'D', "2 Fingers -> Up (向上)"
+        elif up_count == 3:
+            raw_cmd, base_cmd_text = 'R', "3 Fingers -> Left (左转)"
+        elif up_count == 4:
+            raw_cmd, base_cmd_text = 'L', "4 Fingers -> Right (右转)"
+
+    # ================= 5. 500ms 稳定性检测 & 急停发送逻辑 =================
+    current_time = time.time()
+
+    if raw_cmd:
+        # 有手势时，走 500ms 延迟确认逻辑
+        if raw_cmd != candidate_cmd:
+            candidate_cmd = raw_cmd                  # 记录新动作
+            candidate_start_time = current_time      # 重新开始计时
+            display_text = f"{base_cmd_text} (Detecting...)"
+        else:
+            elapsed_time = current_time - candidate_start_time
+            if elapsed_time >= STABILITY_TIME:
+                display_text = f"{base_cmd_text} (Stable!)"
+                if candidate_cmd != last_sent_cmd:
+                    if ser and ser.is_open:
+                        ser.write(candidate_cmd.encode('utf-8'))
+                        print(f"✅ 发送稳定指令: {candidate_cmd} ({base_cmd_text})")
+                    last_sent_cmd = candidate_cmd  
+            else:
+                countdown = STABILITY_TIME - elapsed_time
+                display_text = f"{base_cmd_text} (Wait {countdown:.1f}s)"
     else:
-        # 手势在变化中，维持上一个指令不变，等待稳定
-        target_cmd = last_sent_cmd
-        stable_gesture_name = "Wait for stability..."
+        # ⚠️ 没有有效手势时，瞬间触发急停逻辑 (绕过 500ms 倒计时)
+        candidate_cmd = None
+        display_text = "No Hand -> STOP (急停)"
+        
+        # 确保不会重复疯狂发 'S'
+        if last_sent_cmd != 'S':
+            if ser and ser.is_open:
+                ser.write('S'.encode('utf-8'))
+                print("🛑 丢失手势，瞬间发送急停指令: S")
+            last_sent_cmd = 'S'
 
-    # --- 发送串口指令 ---
-    if target_cmd != last_sent_cmd:
-        if ser and ser.is_open:
-            ser.write(target_cmd.encode('utf-8'))
-        print(f"发送动作指令: {target_cmd}")
-        last_sent_cmd = target_cmd
+    # ================= 6. UI 显示 =================
+    if candidate_cmd and (candidate_cmd == last_sent_cmd):
+        color = (0, 255, 0)   # 绿 (已稳定并发送动作)
+    elif candidate_cmd:
+        color = (0, 255, 255) # 黄 (倒计时中)
+    elif last_sent_cmd == 'S':
+        color = (0, 0, 255)   # 红 (急停状态)
+    else:
+        color = (255, 255, 255) 
 
-    # ================= 5. 可视化界面 (UI) =================
-    # 在屏幕左上角显示当前信息
-    cv2.putText(frame, f"Raw Gesture: {current_gesture}", (10, 40), 
-                cv2.FONT_HERSHEY_SIMPLEX, 0.8, (255, 0, 0), 2)
-                
-    # 显示稳定后的指令
-    color = (0, 255, 0) if target_cmd != 'S' else (0, 0, 255)
-    cv2.putText(frame, f"Command: {target_cmd}", (10, 80), 
-                cv2.FONT_HERSHEY_SIMPLEX, 1, color, 2)
+    cv2.putText(frame, display_text, (10, 50), 
+                cv2.FONT_HERSHEY_SIMPLEX, 0.8, color, 2)
+    cv2.imshow('Gesture Control (500ms Delay + Auto Stop)', frame)
 
-    cv2.imshow('Gesture Control Window', frame)
-
-    # 按 'q' 键退出
     if cv2.waitKey(1) & 0xFF == ord('q'):
         break
 
-# 释放资源
 cap.release()
 cv2.destroyAllWindows()
 if ser:
-    ser.write('S'.encode('utf-8')) # 退出前确保机械臂停止
     ser.close()

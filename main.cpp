@@ -200,62 +200,36 @@ void checkSerialCommands() {
         // Python控制模式
         // ==============================
 
-        switch(cmd)
-        {
-            // 复位
-            case 'S':
-
-                targetBase = RESET_BASE;
-                targetArm = RESET_ARM;
-                targetForearm = RESET_FOREARM;
-                targetGripper = RESET_GRIPPER;
-
-                Serial.println(
-                "Python: Reset"
-                );
-
-                break;
-
-            // 抓取
-            case 'G':
-
-                targetGripper = 120;
-
-                Serial.println(
-                "Python: Grab"
-                );
-
-                break;
-
-            // 松开
-            case 'R':
-
-                targetGripper = 20;
-
-                Serial.println(
-                "Python: Release"
-                );
-
-                break;
-
-            // 抬臂
-            case 'U':
-
-                targetArm = 150;
-
-                Serial.println(
-                "Python: Arm Up"
-                );
-
-                break;
-
-            default:
-
-                Serial.print(
-                "Unknown Python CMD:"
-                );
-                Serial.println(cmd);
-                break;
+        switch (cmd) {
+                    case 'O': // 开爪
+                        targetGripper = 20;  // 爪子张开角度
+                        break;
+                    case 'C': // 握爪
+                        targetGripper = 130; // 爪子闭合角度
+                        break;
+                    case 'D': // 1指：整体向下
+                        targetArm = 100;     // 大臂下压
+                        targetForearm = 80; // 前臂下压
+                        break;
+                    case 'U': // 2指：整体向上
+                        targetArm = 1;      // 大臂抬起
+                        targetForearm = 80;  // 前臂抬起
+                        break;
+                    case 'L': // 3指：往左转
+                        targetBase = 150;    // 底座左转
+                        break;
+                    case 'R': // 4指：往右转
+                        targetBase = 30;     // 底座右转
+                        break;
+                    case 'S': // 急停功能
+                        // 方案：让目标角度直接等于当前实际角度，不再继续运动
+                        targetArm = currentArm;         
+                        targetForearm = currentForearm; 
+                        targetBase = currentBase;       
+                        // targetGripper 视情况而定，一般爪子停在当前位置即可
+                        break;
+                    default:
+                        break;
 
         }
 
